@@ -1,0 +1,376 @@
+---
+title: "Clustering comparison HPA v24 - HPA v25"
+format: html
+---
+
+
+```{r}
+library(tidyverse)
+library(readxl)
+library(patchwork)
+library(clusterProfiler)
+library(RColorBrewer)
+source("scripts/functions_utility.R")
+
+current_dataset <- "tissue"
+
+#Load current results
+umap_current <- read_tsv(paste0("data/", current_dataset, "_HPA25/UMAP/UMAP.tsv"))
+clustering_current <- read_tsv(paste0("data/", current_dataset, "_HPA25/clustering/final_consensus.tsv"))
+
+# Load previous results
+lims_previous <- read_table(paste0("data/", current_dataset, "_coords.txt"))
+umap_previous <- 
+    lims_previous |> 
+    select(gene = ensg_id, UMAP_1_scaled = x, UMAP_2_scaled = y)
+clustering_previous <- 
+    lims_previous |> 
+    select(gene = ensg_id, cluster = cluster_no)
+annotation_previous<- read_excel(paste0("data/annotation_", current_dataset, ".xlsx"))
+```
+
+# UMAP comparison
+
+## Coordinates
+
+```{r}
+plot_data <-
+  umap_previous %>%
+  mutate(r = scales::rescale(UMAP_1_scaled , c(0,1)),
+         g = scales::rescale(UMAP_2_scaled, c(0,1)),
+         b = 0.5,
+         color = rgb(r, g, b)) 
+
+umap_v1 <- 
+  plot_data %>% 
+  ggplot(aes(UMAP_1_scaled, UMAP_2_scaled, color = color)) +
+    geom_point(size = 0.1) +
+    theme_bw() +
+  scale_color_identity()+
+    coord_fixed() +
+  theme_void() +
+  ggtitle("HPA UMAP - previous") +
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+umap_v2 <-
+  umap_current %>%
+  left_join(plot_data %>% 
+              select(gene,color)) %>% 
+  ggplot(aes(UMAP_1_scaled, UMAP_2_scaled, color = color)) +
+    geom_point(size = 0.1) +
+    theme_bw() +
+  scale_color_identity()+
+    coord_fixed() +
+  theme_void() +
+  ggtitle("HPA UMAP - current") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+umap_v1 | umap_v2
+```
+
+## Tissue specificity
+
+```{r}
+## Tissue specificity UMAP
+
+sp_colors <-
+  read_tsv("data/tissue_sc_cluster_colors.tsv")
+
+gene_color <- 
+  final_clustering_data_v1 %>% 
+  filter(dataset_id == "tissue") %>% 
+  left_join(sp_colors %>% 
+              mutate(cluster = as.character(cluster))) %>% 
+  select(gene,color)
+
+umap_data_v1 %>% 
+  filter(dataset_id=="tissue") %>% 
+  mutate(version = "HPA-v1") %>% 
+  bind_rows(umap_data_v2 %>% 
+              filter(dataset_id=="tissue") %>% 
+              mutate(version = "HPA-v2")) %>% 
+  left_join(gene_color) %>% 
+  ggplot(aes(UMAP_1_scaled,UMAP_2_scaled,color=color)) +
+  geom_point(size = 0.5, alpha = 0.8)+
+  theme_void()+
+  facet_wrap(~version) +
+  scale_color_identity()
+
+ggsave("results/Comparison_v1_v2/gene_specificity.pdf")
+
+```
+
+# Bubble heatmap
+
+## ORA
+
+```{r}
+database <- 
+  clustering_previous %>% 
+    left_join(annotation_previous %>% 
+  mutate(full_annotation = paste(Specificity, Function, sep = " - ")) |> 
+              select(full_annotation, cluster = `Cluster ID`)) %>% 
+  select(-cluster) %>% 
+  select(term = full_annotation, gene)
+  
+  
+clustering <- 
+  clustering_current %>% 
+  rename(partition = cluster)
+
+universe <- clustering$gene
+
+outdata <-
+  clustering %>% 
+  group_by(partition) %>% 
+  do({
+    g_data <- .
+    pull(g_data, gene) %>%
+      enricher(universe = universe,
+               TERM2GENE = database, 
+               minGSSize = 10,
+               maxGSSize = Inf,
+               pvalueCutoff = 1,
+               qvalueCutoff = 1) %>%
+      as_tibble()
+  }) %>%
+  ungroup() %>%
+  collect()
+
+outdata %>% 
+  select(partition,ID,GeneRatio,Count) %>% 
+  group_by(partition) %>% 
+    mutate(n = sum(Count))
+
+res_enrichment <- 
+  outdata %>%  
+  mutate(GeneFrac = as.numeric(gsub("\\/.*", "", GeneRatio)) /
+           as.numeric(gsub(".*\\/", "", GeneRatio)),
+         BgFrac = as.numeric(gsub("\\/.*", "", BgRatio)) /
+           as.numeric(gsub(".*\\/", "", BgRatio)),
+         odds_ratio = GeneFrac / BgFrac)
+
+#write_excel_csv(res_enrichment_tissue, "results/Comparison_v1_v2/enrichment_all_20220322.csv")
+
+label_transfer <- 
+  res_enrichment %>% 
+  left_join(annotation_previous %>% 
+              select(cluster, ID = full_annotation, Specificity)) %>% 
+ # mutate(partition = factor(partition, levels = plot_order$cluster),
+ #        ID = factor(ID, levels = plot_order$ID)) %>% 
+  filter(GeneFrac > 0.5) %>% 
+  select(partition, cluster) %>% 
+  rename(new_cluster = partition,
+         old_cluster = cluster) %>% 
+  mutate(new_cluster = as.character(new_cluster)) %>% 
+  arrange(as.numeric(new_cluster)) %>% 
+  mutate(dataset_id = "tissue") %>% 
+  select(dataset_id, new_cluster, old_cluster)
+
+#write_tsv(tissue_label_transfer, paste(file_structure_v2$tissue$main, "label_transfer.tsv", sep ="/"))
+```
+
+## Automatic label transfer
+
+## Bubble plot
+
+
+```{r}  
+  plot_data <-
+    res_enrichment %>%
+    mutate(cluster = as.character(partition),
+           ID = as.character(ID)) %>% 
+    select(-partition) %>% 
+    #left_join(cluster_annotation %>%
+     #           select(dataset_id, cluster, full_annotation)) %>%
+  #  select(-Description) %>% 
+   # rename(Description = full_annotation) %>% 
+    # left_join(cluster_annotation %>% 
+    #             select(dataset_id, cluster, full_annotation)) %>%
+  #unite(cluster, cluster, Description) %>% 
+    #  unite(ID, id, ID, Description) %>% 
+    select(cluster, ID, odds_ratio) %>% 
+    group_by_all() %>% 
+    mutate(capped_odds_ratio = min(c(odds_ratio,
+                                     50))) %>% 
+    ungroup() 
+  
+  cluster_levels <- 
+    clustering %>% 
+    select(partition) %>% 
+    distinct() #%>% 
+    #arrange(dataset_id, as.numeric(cluster)) %>% 
+    #left_join(cluster_annotation %>% 
+     #           select(dataset_id, cluster, full_annotation), sep = " ") %>% 
+    #unite(cluster,cluster, full_annotation)
+  
+  plot_size_range <- c(1, 4)
+  
+  plot_legend_settings <- 
+    tibble(odds_ratio_str = c(1, 10, 20, 30, 40, ">50"),
+           y = 1:6,
+           odds_ratio = c(1, 10, 20, 30, 40, 50)) 
+  
+  plot_legend <-
+    plot_legend_settings %>% 
+    ggplot(aes(1, y, 
+               size = odds_ratio,
+               fill = odds_ratio,
+               label = odds_ratio_str)) +
+    geom_point(shape = 21,
+               show.legend = F) +
+    geom_text(size = 4, 
+              hjust = 0,
+              nudge_x = 0.1) +
+    annotate("text", x = 1, y = 7, label = "Odds ratio",
+             fontface = "bold", hjust = 0) +
+    scale_x_continuous(limits = c(0, 2)) +
+    scale_y_continuous(limits = c(0, 7)) +
+    scale_fill_gradient(name = "Odds ratio",
+                        low = "white", high = "orangered",
+                        breaks = plot_legend_settings$odds_ratio,
+                        limits = range(plot_legend_settings$odds_ratio)) + 
+    scale_size_continuous(name = "Odds ratio", 
+                          range = plot_size_range, 
+                          breaks = plot_legend_settings$odds_ratio,
+                          limits = range(plot_legend_settings$odds_ratio)) +
+    theme_void()
+  
+ 
+  plot_clustering <- 
+    plot_data %>% 
+    #filter(dataset_id == "singlecell") %>% 
+    select(cluster, ID, odds_ratio) %>% 
+    spread(ID, odds_ratio, fill = 0) %>% 
+    column_to_rownames("cluster") %>%
+    list(terms = t(.), 
+         cluster = .) %>%
+    map(. %>% 
+          dist(method = "binary") %>% 
+          hclust(method = "ward.D2"))
+
+  
+  plot_order <- 
+    list(cluster = unique(c(with(plot_clustering$cluster,
+                                 labels[order]),
+                            cluster_levels$partition)),
+         ID = unique(c(with(plot_clustering$terms,
+                                 labels[order]),
+                            unique(database$term))))
+  
+
+  
+   plot <-
+  plot_data %>%
+    ungroup() %>% 
+   # filter(dataset_id == "singlecell") %>% 
+    # mutate(cluster = factor(cluster,
+    #                         plot_order$cluster),
+    #        ID = factor(ID,
+    #                    plot_order$ID)) %>%
+    ggplot(aes(ID, cluster, 
+               size = capped_odds_ratio, 
+               fill = capped_odds_ratio)) +
+    geom_point(data = expand_grid(cluster = plot_order$cluster,
+                                  ID = plot_order$ID) %>%
+                mutate(cluster = factor(cluster, unique(cluster)),
+                     ID = factor(ID, unique(ID))),
+               fill = NA,
+               size = NA) +
+    geom_point(shape = 21,
+               show.legend = F) +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust = 0.5, size = 6),
+          legend.position = "right",
+          axis.text.y = element_text(size = 6)) +
+    # coord_fixed() +
+    scale_fill_gradient(name = "Odds ratio",
+                        low = "white", high = "orangered",
+                        breaks = plot_legend_settings$odds_ratio,
+                        limits = range(plot_legend_settings$odds_ratio)) + 
+    scale_size_continuous(name = "Odds ratio", 
+                          range = plot_size_range, 
+                          breaks = plot_legend_settings$odds_ratio,
+                          limits = range(plot_legend_settings$odds_ratio)) +
+    theme(axis.title = element_blank()) + 
+    #coord_fixed() +
+    coord_flip()#+
+  
+  
+     ggsave(savepath("Buble_heatmap_v1-v2_2.pdf"),
+       plot = plot,
+      width = 10, height = 10)
+}
+
+plot + plot_legend
+ggsave(savepath("plot_legend.pdf"))
+```
+
+# Summary
+
+
+
+```{r}
+
+plot_df <-
+  clustering_current |>
+  left_join(
+    clustering_previous |>
+      rename(previous_cluster = cluster) |>
+      left_join(
+        annotation_previous |>
+          mutate(full_annotation = paste(Specificity, Function, sep = " - ")) |>
+          select(full_annotation, previous_cluster = `Cluster ID`),
+        by = "previous_cluster"
+      ),
+    by = "gene"
+  ) |>
+  count(cluster, previous_cluster, name = "n")      %>%
+  mutate(previous_cluster_collapsed = ifelse(n > 30,
+                                             as.character(previous_cluster),
+                                             "Other (<30)"))   |> 
+group_by(cluster, previous_cluster_collapsed) |>
+summarise(n = sum(n))      
+# Prepare colors
+levels_fill <- 
+    plot_df$previous_cluster_collapsed %>%
+  unique() %>%
+  na.omit() %>%                     # remove NA
+  setdiff("Other (<30)") |>             # exclude "Other (<50)" 
+  as.numeric() |> 
+sort() |> 
+as.character()
+# Generate enough distinct colors dynamically
+colors_rest <- hcl.colors(length(levels_fill), palette = "Dynamic")  
+names(colors_rest) <- levels_fill
+
+# Add light gray for Other (<50)
+colors_manual <- c(colors_rest, "Other (<30)" = "lightgray")
+
+# Prepare legend order
+legend_levels <- c(levels_fill, "Other (<30)")
+
+# Make previous_cluster_collapsed a factor with desired order
+plot_df <- plot_df %>%
+  mutate(previous_cluster_collapsed = factor(previous_cluster_collapsed, levels = legend_levels))
+
+
+ggplot(plot_df,
+       aes(x = as.factor(cluster), y = n,
+           fill = factor(previous_cluster_collapsed))) +
+  geom_col() +
+  coord_flip() +
+  geom_text(
+    aes(label = ifelse(previous_cluster_collapsed != "Other (<30)", previous_cluster_collapsed, NA)), 
+    position = position_stack(vjust = 0.5),
+    color = "white",
+    na.rm = TRUE
+  ) +
+      scale_fill_manual(name = "Previous cluster", values = colors_manual) +
+
+  theme_bw() +
+  xlab("New clusters") +
+  ylab("Numbe of genes")
+                             
+
+```
