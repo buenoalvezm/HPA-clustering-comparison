@@ -10,6 +10,8 @@ library(readxl)
 library(patchwork)
 library(clusterProfiler)
 library(RColorBrewer)
+library(pheatmap)
+
 source("scripts/functions_utility.R")
 
 current_dataset <- "tissue"
@@ -330,7 +332,10 @@ plot_df <-
                                              as.character(previous_cluster),
                                              "Other (<30)"))   |> 
 group_by(cluster, previous_cluster_collapsed) |>
-summarise(n = sum(n))      
+summarise(n = sum(n)) |>
+mutate(cluster = factor(cluster),
+previous_cluster_collapsed = factor(previous_cluster_collapsed))     
+
 # Prepare colors
 levels_fill <- 
     plot_df$previous_cluster_collapsed %>%
@@ -351,14 +356,15 @@ colors_manual <- c(colors_rest, "Other (<30)" = "lightgray")
 legend_levels <- c(levels_fill, "Other (<30)")
 
 # Make previous_cluster_collapsed a factor with desired order
-plot_df <- plot_df %>%
+plot_df <- 
+  plot_df %>%
   mutate(previous_cluster_collapsed = factor(previous_cluster_collapsed, levels = legend_levels))
 
 
 ggplot(plot_df,
        aes(x = as.factor(cluster), y = n,
            fill = factor(previous_cluster_collapsed))) +
-  geom_col() +
+  geom_col(show.legend = F) +
   coord_flip() +
   geom_text(
     aes(label = ifelse(previous_cluster_collapsed != "Other (<30)", previous_cluster_collapsed, NA)), 
@@ -371,6 +377,128 @@ ggplot(plot_df,
   theme_bw() +
   xlab("New clusters") +
   ylab("Numbe of genes")
-                             
 
+
+p1 <- 
+  plot_df %>% arrange(cluster, previous_cluster_collapsed) |> 
+  ggplot(
+       aes(x = cluster, y = n,
+           fill = previous_cluster_collapsed)) +
+  geom_col(show.legend = F) +
+  coord_flip() +
+ geom_text(
+    aes(label = ifelse(previous_cluster_collapsed == "Other (<30)", 
+                       NA, 
+                       as.character(previous_cluster_collapsed))), 
+    position = position_stack(vjust = 0.5),
+    color = "white",
+    na.rm = TRUE
+  ) +
+  #geom_text(
+  #  aes(label = ifelse(previous_cluster_collapsed != "Other (<30)", previous_cluster_collapsed, NA)), 
+  #  position = position_stack(vjust = 0.5),
+  #  color = "white",
+  #  na.rm = TRUE
+  #) +
+      scale_fill_manual(name = "Previous cluster", values = colors_manual) +
+
+  theme_bw() +
+  xlab("New clusters") +
+  ylab("Numbe of genes") +
+  ggtitle("Cluster ID")
+
+
+
+consensus_colors <- 
+  read_tsv("data/colors_consensus.tsv")
+
+consensus_colors <-
+  consensus_colors %>% 
+  mutate(sample = tolower(sample)) |> 
+ # filter(dataset_id == "tissue") |> 
+ # mutate(color = ifelse(color == "#DE6C7D", "#B38C6D", color),
+  #       color = ifelse(color == "#A1A8AA", "#DE6C7D", color)) |> 
+         select(-dataset_id) |> 
+         deframe()
+
+consensus_colors <- c(consensus_colors, "non-specific" ="gray20")
+p2 <- 
+  plot_df |> 
+  left_join(annotation_previous |> 
+  mutate(previous_cluster_collapsed = as.factor(`Cluster ID`)), by = "previous_cluster_collapsed" ) |> 
+  mutate(Specificity = tolower(Specificity)) |> 
+  ggplot(aes(x = as.factor(cluster), y = n,
+           fill = Specificity)) +
+  geom_col(show.legend = F) +
+  coord_flip() +
+  geom_text(
+    aes(label = ifelse(previous_cluster_collapsed == "Other (<30)", 
+                       NA, 
+                       as.character(previous_cluster_collapsed))), 
+    position = position_stack(vjust = 0.5),
+    color = "white",
+    na.rm = TRUE
+  ) +
+    scale_fill_manual(values = consensus_colors) +
+
+  theme_bw() +
+  #  theme(legend.position = "bottom") +
+  xlab("New clusters") +
+  ylab("Numbe of genes") +
+  ggtitle("Specificity")
+
+
+top_cluster <-
+   plot_df |> 
+  left_join(annotation_previous |> 
+  mutate(previous_cluster_collapsed = as.factor(`Cluster ID`)), by = "previous_cluster_collapsed" ) |> 
+  mutate(Specificity = tolower(Specificity)) |> 
+  filter(previous_cluster_collapsed != "Other (<30)") |> 
+  group_by(cluster) |> 
+  top_n(1, n) |> 
+  select(cluster, previous_cluster_collapsed, Specificity, Function, Reliability)
+
+blues <- brewer.pal(3, "Blues")
+names(blues) <- c("Low", "Medium", "High")
+pal_tile <- c(blues, consensus_colors)
+
+p3 <- 
+  plot_df |> 
+  distinct(cluster) |> 
+  left_join(top_cluster) |> 
+  rename(top_cluster_hit = previous_cluster_collapsed) |> 
+  pivot_longer(names_to = "type", values_to = "value", cols = c(top_cluster_hit, Specificity, Function, Reliability)) |> 
+  mutate(type = factor(type, levels = c("top_cluster_hit", "Specificity", "Function", "Reliability"))) |> 
+  ggplot(aes(type, cluster, label = value, fill = value)) +
+  geom_tile(show.legend = F) +
+  geom_text() +
+  scale_fill_manual(values = pal_tile, na.value = "grey90") +
+  xlab("") +
+  ylab("") +
+  ggtitle("Top hit")
+                             
+p1 + p2 + p3 +
+  plot_layout(widths = c(1,1,2))
+
+ggsave(filename = paste0("results/", current_dataset, "_clustering_comparison.pdf"),
+h = 12, 
+w = 20)
+```
+
+# Overlap heatmap
+
+
+```{r}
+overlap_mat <- 
+  
+  clustering_current |> 
+    left_join(clustering_previous |> 
+    rename(previous_cluster = cluster)) |> 
+  count(cluster, previous_cluster) %>%   # counts genes in each (new, old) pair
+  pivot_wider(names_from = previous_cluster,
+              values_from = n,
+              values_fill = 0) |> 
+                column_to_rownames("cluster")
+
+pheatmap(overlap_mat)
 ```
